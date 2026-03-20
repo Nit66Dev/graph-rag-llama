@@ -1,6 +1,6 @@
 # graph-rag-llama
 
-# 🛠️ Environment Setup & Troubleshooting Guide
+# Environment Setup & Troubleshooting Guide
 
 ## Overview
 Building a fully local Hybrid Retrieval-Augmented Generation (RAG) system requires integrating bleeding-edge AI libraries with local infrastructure (Docker, Git, Python). During the environment provisioning on a legacy macOS machine (Apple Silicon), several system-level and dependency constraints were encountered.
