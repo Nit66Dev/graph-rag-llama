@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+.venv/
+venv/
+*.pyc
+
+# Local Databases (The heavy stuff)
+chroma_db/
+neo4j_data/
+ollama_data/
+all-MiniLM-L6-v2/
+
+# Environment/OS
+.DS_Store
+.env
