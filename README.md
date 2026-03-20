@@ -82,7 +82,7 @@ fatal: early EOF
 git config --global http.version HTTP/1.1
 git config --global http.postBuffer 524288000
 ```
-# Ran the brew install again, then reverted Git to HTTP/2
+Ran the brew install again, then reverted Git to HTTP/2
 
 ### 7. Ghost Docker Desktop Credentials
 **Error:**
