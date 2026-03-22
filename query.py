@@ -1,21 +1,101 @@
 import nest_asyncio
 nest_asyncio.apply()
 
+import chromadb
 from llama_index.core import Settings
 from llama_index.core import PropertyGraphIndex
-from llama_index.core.indices.property_graph import (
-    VectorContextRetriever,
-    LLMSynonymRetriever,
-)
+from llama_index.vector_stores.chroma import ChromaVectorStore
 from config import setup_environment
+
+
+def get_full_graph_context(graph_store) -> str:
+    """Fetch all triples from Neo4j. Used as fallback for conceptual or
+    aggregation questions where no specific entity name is matched."""
+    triples = graph_store.structured_query(
+        """
+        MATCH (a:__Entity__)-[r]->(b:__Entity__)
+        RETURN a.name AS from_node, type(r) AS relation, b.name AS to_node
+        """
+    )
+    if not triples:
+        return ""
+    return "\n".join(
+        f"{row['from_node']} -> {row['relation']} -> {row['to_node']}"
+        for row in triples
+    )
+
+
+def get_context_for_question(question: str, graph_store) -> tuple[str, bool]:
+    """
+    Returns (context_string, used_full_graph).
+
+    First attempts a targeted keyword match against entity names. If no seed
+    nodes are found, falls back to the full graph so the LLM can answer
+    conceptual or aggregation questions like 'list all CEOs'.
+    """
+    words = [w.strip("?.,") for w in question.lower().split() if len(w) > 3]
+    conditions = " OR ".join(
+        [f"toLower(n.name) CONTAINS '{w}'" for w in words]
+    )
+
+    seed_results = graph_store.structured_query(
+        f"""
+        MATCH (n:__Entity__)
+        WHERE {conditions}
+        RETURN n.name AS name
+        LIMIT 10
+        """
+    )
+
+    if seed_results:
+        seed_names = [r["name"] for r in seed_results]
+        triples = graph_store.structured_query(
+            """
+            MATCH (a:__Entity__)-[r]->(b:__Entity__)
+            WHERE a.name IN $names OR b.name IN $names
+            RETURN a.name AS from_node, type(r) AS relation, b.name AS to_node
+            LIMIT 40
+            """,
+            param_map={"names": seed_names},
+        )
+        if triples:
+            context = "\n".join(
+                f"{row['from_node']} -> {row['relation']} -> {row['to_node']}"
+                for row in triples
+            )
+            return context, False
+
+    # No seed match — fall back to full graph for conceptual questions
+    return get_full_graph_context(graph_store), True
+
+
+def answer_question(question: str, context: str, used_full_graph: bool) -> str:
+    scope_note = (
+        "The context below contains all known relationships in the knowledge base."
+        if used_full_graph
+        else "The context below contains relationships relevant to the question."
+    )
+    prompt = (
+        f"You are a knowledge graph assistant. Answer the question using only "
+        f"the graph triples provided. Each triple is in the form "
+        f"'subject -> relation -> object'.\n"
+        f"{scope_note}\n\n"
+        f"Graph context:\n{context}\n\n"
+        f"Question: {question}\n\n"
+        f"Answer:"
+    )
+    response = Settings.llm.complete(prompt)
+    return response.text.strip()
 
 
 def main():
     print("\n--- Waking up Hybrid RAG System ---")
 
-    vector_store, graph_store = setup_environment()
+    _, graph_store = setup_environment()
 
-    print("Connecting to Vector & Graph Stores...")
+    db = chromadb.PersistentClient(path="./chroma_db")
+    collection = db.get_collection("hybrid_rag_collection")
+    vector_store = ChromaVectorStore(chroma_collection=collection)
 
     index = PropertyGraphIndex.from_existing(
         property_graph_store=graph_store,
@@ -23,33 +103,6 @@ def main():
         embed_model=Settings.embed_model,
     )
 
-    # LLMSynonymRetriever: expands your question into synonyms and
-    # searches the graph by the 'name' property on __Entity__ nodes
-    llm_retriever = LLMSynonymRetriever(
-        index.property_graph_store,
-        llm=Settings.llm,
-        include_text=True,
-        synonym_prompt=None,
-        max_keywords=10,
-        path_depth=2,
-    )
-
-    # VectorContextRetriever: finds nodes by semantic similarity
-    # using the embeddings stored during ingestion
-    vector_retriever = VectorContextRetriever(
-        index.property_graph_store,
-        embed_model=Settings.embed_model,
-        similarity_top_k=5,
-        path_depth=2,
-        include_text=True,
-    )
-
-    query_engine = index.as_query_engine(
-        sub_retrievers=[llm_retriever, vector_retriever],
-        llm=Settings.llm,
-    )
-
-    # Show what's actually in the graph so you know what to ask about
     print("\n--- Entities currently in your Knowledge Base ---")
     results = graph_store.structured_query(
         """
@@ -62,9 +115,9 @@ def main():
     if results:
         for row in results:
             label = [l for l in row["type"] if l not in ("__Node__", "__Entity__")]
-            print(f"  [{', '.join(label)}] {row['name']}")
+            print(f"  [{', '.join(label) or 'entity'}] {row['name']}")
     else:
-        print("  (no entities found)")
+        print("  (no entities found -- run ingest_files.py first)")
 
     print("\n--- Relationships in your Knowledge Base ---")
     rel_results = graph_store.structured_query(
@@ -80,24 +133,32 @@ def main():
     else:
         print("  (no relationships found)")
 
-    print("\nSystem Ready. Type 'exit' to quit.")
-    print("Tip: Ask about the entities listed above!\n")
+    print("\nSystem Ready. Type 'exit' to quit.\n")
 
     while True:
-        question = input("Ask your Knowledge Base: ")
+        question = input("Ask your Knowledge Base: ").strip()
+
+        if not question:
+            continue
 
         if question.lower() == "exit":
             print("Shutting down. Goodbye!")
             break
 
-        print("Llama 3 is thinking...\n")
+        print("Thinking...\n")
 
         try:
-            response = query_engine.query(question)
-            answer = str(response).strip()
+            context, used_full_graph = get_context_for_question(question, graph_store)
+
+            if not context:
+                print("No data found in the knowledge base.\n")
+                print("-" * 50)
+                continue
+
+            answer = answer_question(question, context, used_full_graph)
 
             if not answer or answer.lower() in ("none", "empty response"):
-                print("No answer found. Try asking about one of the entities shown above.\n")
+                print("Could not generate an answer. Try rephrasing the question.\n")
             else:
                 print(f"Answer: {answer}\n")
 
