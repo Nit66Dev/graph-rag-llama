@@ -1,6 +1,3 @@
-import nest_asyncio
-nest_asyncio.apply()  # <--- This fixes the "Event loop is closed" crash
-
 import chromadb
 from llama_index.core import Settings
 from llama_index.llms.ollama import Ollama
@@ -24,9 +21,11 @@ def setup_environment():
 
     Settings.llm = llm
     Settings.embed_model = embed_model
-    Settings.chunk_size = 512
-    Settings.chunk_overlap = 50
-    Settings.embed_batch_size = 1  # Send 1 request at a time so Ollama doesn't choke
+
+    Settings.chunk_size = 1024       # was 512
+    Settings.chunk_overlap = 100     # slightly wider overlap avoids missing
+
+    Settings.embed_batch_size = 1
 
     db = chromadb.PersistentClient(path="./chroma_db")
     chroma_collection = db.get_or_create_collection("hybrid_rag_collection")
